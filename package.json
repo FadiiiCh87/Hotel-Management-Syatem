@@ -1,0 +1,16 @@
+{
+  "name": "hotel-management-system",
+  "private": true,
+  "version": "0.1.0",
+  "workspaces": [
+    "apps/*"
+  ],
+  "scripts": {
+    "dev": "concurrently \"npm run dev -w @hms/api\" \"npm run dev -w @hms/web\"",
+    "build": "npm run build -w @hms/api && npm run build -w @hms/web"
+  },
+  "devDependencies": {
+    "concurrently": "^9.1.2",
+    "typescript": "^5.8.3"
+  }
+}
