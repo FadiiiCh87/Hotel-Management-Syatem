@@ -1,0 +1,20 @@
+name: PK-Hotels API build
+on:
+  push:
+    branches:
+      - feature/pk-hotels-phase2-billing
+  pull_request:
+jobs:
+  api-build:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '22'
+          cache: npm
+          cache-dependency-path: package-lock.json
+      - name: Install dependencies
+        run: npm ci
+      - name: Build NestJS API
+        run: npm run build -w @hms/api
