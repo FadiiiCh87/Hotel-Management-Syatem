@@ -12,4 +12,7 @@ The exact room numbers have been provided by hotel management. Do not change or 
 ## Seed
 Run `apps/api/prisma/phase1.sql` first on a **new dedicated PK-Hotels PostgreSQL database**, then `apps/api/prisma/seed-pk-hotels-rooms.sql`.
 
-The seed is idempotent and asserts 40 rooms. Room types have provisional **0** nightly rates and provisional capacity **2**, neither of which is an approved business value. **Do not take real reservations until rates and capacities are confirmed and configured.** Do not run this seed against the existing unrelated Supabase project.
+The seed is idempotent, asserts 40 rooms, and upserts the **approved nightly rates**: Normal SAR 60, Standard SAR 100, Deluxe SAR 200, Super VVIP SAR 500. Occupancy capacity **2** remains provisional and must be confirmed before live operations. Do not run this seed against the existing unrelated Supabase project.
+
+## Reservation room charge
+The API stores the category's nightly rate as a **snapshot** in each reservation. Nights = departure date minus arrival date; room subtotal (SAR) = nights × stored nightly rate. The API returns `nights` and `roomSubtotalSar` for new reservations and SQL-derived `nights` and `room_subtotal_sar` for reservation listings. This is **room subtotal only**; VAT, discounts, service fees, deposits and payments are not yet implemented. Changing future category rates will not retroactively alter existing reservation snapshots.
