@@ -1,6 +1,6 @@
 -- PK-Hotels approved room inventory: exactly 40 unique room numbers.
 -- Idempotent inventory seed. Run only after phase1.sql on the DEDICATED PK-Hotels database.
--- Rates intentionally not invented: zero is a disabled placeholder; manager must approve rates before bookings.
+-- Approved nightly room rates in SAR. Re-running seed synchronizes category rates.
 BEGIN;
 DO $$
 DECLARE h uuid; normal_type uuid; standard_type uuid; deluxe_type uuid; vvip_type uuid; n text;
@@ -8,8 +8,8 @@ BEGIN
  SELECT id INTO h FROM hotels WHERE name='PK-Hotels';
  IF h IS NULL THEN RAISE EXCEPTION 'PK-Hotels not found; apply phase1.sql first'; END IF;
  INSERT INTO room_types(hotel_id,name,nightly_rate,capacity)
- VALUES (h,'Normal',0,2),(h,'Standard',0,2),(h,'Deluxe',0,2),(h,'Super VVIP',0,2)
- ON CONFLICT(hotel_id,name) DO NOTHING;
+ VALUES (h,'Normal',60,2),(h,'Standard',100,2),(h,'Deluxe',200,2),(h,'Super VVIP',500,2)
+ ON CONFLICT(hotel_id,name) DO UPDATE SET nightly_rate=EXCLUDED.nightly_rate;
  SELECT id INTO normal_type FROM room_types WHERE hotel_id=h AND name='Normal';
  SELECT id INTO standard_type FROM room_types WHERE hotel_id=h AND name='Standard';
  SELECT id INTO deluxe_type FROM room_types WHERE hotel_id=h AND name='Deluxe';
