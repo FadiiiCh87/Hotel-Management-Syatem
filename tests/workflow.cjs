@@ -1,0 +1,71 @@
+// Real SQL and HTTP workflow against an isolated, in-memory PostgreSQL engine.
+const assert=require('node:assert/strict');
+const fs=require('node:fs');
+const {PGlite}=require('@electric-sql/pglite');
+const {btree_gist}=require('@electric-sql/pglite/contrib/btree_gist');
+const {pgcrypto}=require('@electric-sql/pglite/contrib/pgcrypto');
+const argon2=require('argon2');
+(async()=>{
+ const db=new PGlite({extensions:{btree_gist,pgcrypto}});
+ await db.waitReady;
+ for(const f of ['phase1.sql','phase2-billing.sql','phase2-tax-safety.sql','seed-pk-hotels-rooms.sql'])await db.exec(fs.readFileSync('apps/api/prisma/'+f,'utf8'));
+ const hotel=(await db.query('SELECT id FROM hotels')).rows[0].id;
+ const hash=await argon2.hash('Test-Only-Password-123');
+ await db.query("INSERT INTO staff(hotel_id,email,password_hash,role) VALUES($1,'test@example.com',$2,'ADMIN')",[hotel,hash]);
+ class Pool {async query(sql,params){const r=await db.query(sql,params);return {rows:r.rows,rowCount:r.rows.length||r.affectedRows||0};}async connect(){return {query:this.query.bind(this),release(){}};}}
+ require('pg').Pool=Pool;
+ process.env.JWT_SECRET='test-only-random-secret-for-isolated-workflow-tests';
+ const {NestFactory}=require('@nestjs/core');const {ValidationPipe}=require('@nestjs/common');const {AppModule}=require('../apps/api/dist/module');
+ const app=await NestFactory.create(AppModule,{logger:false});app.setGlobalPrefix('api/v1');app.useGlobalPipes(new ValidationPipe({whitelist:true,forbidNonWhitelisted:true,transform:true}));await app.listen(4200,'127.0.0.1');
+ let token;let count=0;
+ async function request(path,body,status=200){const r=await fetch('http://127.0.0.1:4200/api/v1'+path,{method:body===undefined?'GET':'POST',headers:{'Content-Type':'application/json',...(token?{Authorization:'Bearer '+token}:{})},...(body===undefined?{}:{body:JSON.stringify(body)})});const data=await r.json();assert.equal(r.status,status,JSON.stringify({path,data}));count++;return data;}
+ try{
+ await request('/operations/rooms',undefined,401);
+ await request('/auth/login',{email:'test@example.com',password:'wrong'},401);
+ token=(await request('/auth/login',{email:'test@example.com',password:'Test-Only-Password-123'},201)).accessToken;
+ const rooms=await request('/operations/rooms');assert.equal(rooms.length,40);
+ const guest=await request('/operations/guests',{fullName:'Isolated test guest'},201);
+ const day=(await db.query("select (now() at time zone 'Asia/Riyadh')::date::text as day")).rows[0].day;
+ const end=new Date(day+'T00:00:00Z');end.setUTCDate(end.getUTCDate()+1);const departure=end.toISOString().slice(0,10);
+ const reservation=await request('/operations/reservations',{guestId:guest.id,roomId:rooms[0].id,arrivalDate:day,departureDate:departure},201);
+ await request('/operations/reservations',{guestId:guest.id,roomId:rooms[0].id,arrivalDate:day,departureDate:departure},409);
+ const availability=await request('/operations/rooms?arrival='+day+'&departure='+departure);assert.equal(availability.find(r=>r.id===rooms[0].id).bookable,false);
+ await request('/operations/blocks',{roomId:rooms[0].id,startDate:day,endDate:departure,reason:'Overlapping test'},409);
+ await request('/operations/reservations/'+reservation.id+'/status',{status:'CHECKED_IN'},201);
+ await request('/operations/rooms/'+rooms[0].id+'/status',{status:'MAINTENANCE'},409);
+ await request('/operations/reservations/'+reservation.id+'/status',{status:'CHECKED_OUT'},409);
+ const opened=await request('/billing/reservations/'+reservation.id+'/folio',{},201);
+ let folio=await request('/billing/folios/'+opened.folioId);assert.equal(Number(folio.balanceBeforeTaxSar),Number(rooms[0].nightly_rate));
+ await request('/billing/folios/'+opened.folioId+'/lines',{type:'SERVICE',description:'Test service',quantity:'1',unitPriceSar:'10.00'},201);
+ await request('/billing/folios/'+opened.folioId+'/lines',{type:'DISCOUNT',description:'Test discount',quantity:'1',unitPriceSar:'5.00'},201);
+ await request('/operations/reservations/'+reservation.id+'/status',{status:'CHECKED_OUT'},409);
+ folio=await request('/billing/folios/'+opened.folioId);const {randomUUID}=require('node:crypto');
+ await request('/billing/folios/'+opened.folioId+'/payments',{amountSar:String(Number(folio.balanceBeforeTaxSar)+1),method:'CASH',idempotencyKey:randomUUID()},409);
+ const payment={amountSar:folio.balanceBeforeTaxSar,method:'CASH',idempotencyKey:randomUUID()};
+ await request('/billing/folios/'+opened.folioId+'/payments',payment,201);
+ await request('/billing/folios/'+opened.folioId+'/payments',payment,201);
+ folio=await request('/billing/folios/'+opened.folioId);assert.equal(folio.payments.length,1);assert.equal(folio.balanceBeforeTaxSar,'0.00');
+ const preview=await request('/tax-and-invoices/folios/'+opened.folioId+'/statement-preview');assert.equal(preview.officialInvoice,false);assert.equal(preview.vatAmountSar,null);assert.equal(preview.taxStatus,'UNCONFIRMED');
+ await request('/operations/reservations/'+reservation.id+'/status',{status:'CHECKED_OUT'},201);
+ const after=await request('/operations/rooms');assert.equal(after.find(r=>r.id===rooms[0].id).status,'CLEANING');
+ await request('/billing/folios/'+opened.folioId+'/payments',{...payment,idempotencyKey:randomUUID()},409);
+ await request('/operations/rooms/'+rooms[0].id+'/status',{status:'AVAILABLE'},201);
+ await request('/operations/reservations/'+reservation.id+'/status',{status:'CHECKED_IN'},409);
+ await request('/operations/blocks',{roomId:rooms[1].id,startDate:day,endDate:departure,reason:'Maintenance test'},201);
+ await request('/operations/reservations',{guestId:guest.id,roomId:rooms[1].id,arrivalDate:day,departureDate:departure},409);
+ const types=await request('/operations/room-types');await request('/operations/room-types/'+types[0].id+'/rate',{nightlyRate:'90.00'},201);
+ assert.equal(Number((await db.query('SELECT nightly_rate FROM reservations WHERE id=$1',[reservation.id])).rows[0].nightly_rate),Number(rooms[0].nightly_rate));
+ await request('/billing/reservations/'+reservation.id+'/folio');
+ await request('/operations/rooms?arrival='+departure+'&departure='+day,undefined,400);
+ await request('/operations/guests',{fullName:'Test',unexpected:'value'},400);
+ const staffId=(await db.query("SELECT id FROM staff WHERE email='test@example.com'")).rows[0].id;
+ await db.query("UPDATE staff SET role='RECEPTIONIST' WHERE id=$1",[staffId]);
+ await request('/operations/rooms',undefined,401);
+ token=(await request('/auth/login',{email:'test@example.com',password:'Test-Only-Password-123'},201)).accessToken;
+ await request('/operations/room-types/'+types[0].id+'/rate',{nightlyRate:'90.00'},403);
+ await request('/operations/blocks',{roomId:rooms[2].id,startDate:day,endDate:departure,reason:'Denied'},403);
+ await request('/operations/rooms');
+ await db.query("UPDATE staff SET active=false WHERE email='test@example.com'");await request('/operations/rooms',undefined,401);
+ console.log('PASS:',count,'HTTP checks, real PostgreSQL constraints, billing totals, payment idempotency, VAT-unconfirmed statement, checkout and staff revocation.');
+ }finally{await app.close();await db.close();}
+})().catch(e=>{console.error(e);process.exitCode=1});

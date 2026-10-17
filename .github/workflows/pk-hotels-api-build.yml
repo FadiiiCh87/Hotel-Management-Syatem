@@ -13,6 +13,8 @@ jobs:
         with:
           node-version: '22'
       - name: Install dependencies
-        run: npm install --no-audit --no-fund
-      - name: Build NestJS API
-        run: npm run build -w @hms/api
+        run: npm ci --no-audit --no-fund
+      - name: Verify operational workflow
+        run: npm test
+      - name: Build staff dashboard
+        run: npm run build -w @hms/web

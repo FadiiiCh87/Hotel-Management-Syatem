@@ -7,9 +7,11 @@
   ],
   "scripts": {
     "dev": "concurrently \"npm run dev -w @hms/api\" \"npm run dev -w @hms/web\"",
-    "build": "npm run build -w @hms/api && npm run build -w @hms/web"
+    "build": "npm run build -w @hms/api && npm run build -w @hms/web",
+    "test": "npm run build -w @hms/api && node tests/workflow.cjs"
   },
   "devDependencies": {
+    "@electric-sql/pglite": "0.5.10",
     "concurrently": "^9.1.2",
     "typescript": "^5.8.3"
   }
