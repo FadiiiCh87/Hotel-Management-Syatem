@@ -68,7 +68,7 @@ class OperationsController {
   return this.s.transaction(async c=>{const r=await c.query('INSERT INTO guests(hotel_id,full_name,phone,email) VALUES($1,$2,$3,$4) RETURNING id,full_name,phone,email',[user.hotelId,dto.fullName,dto.phone||null,dto.email||null]);await this.s.audit(c,user,'GUEST_CREATED',r.rows[0].id);return r.rows[0]});
  }
  @Get('reservations') async reservations(@Headers('authorization') token:string){
-  const user=this.claims(token);return this.s.query('SELECT r.id,r.arrival_date,r.departure_date,r.status,r.nightly_rate,g.full_name,rm.number FROM reservations r JOIN guests g ON g.id=r.guest_id JOIN rooms rm ON rm.id=r.room_id WHERE r.hotel_id=$1 ORDER BY r.created_at DESC LIMIT 100',[user.hotelId]);
+  const user=this.claims(token);return this.s.query('SELECT r.id,r.arrival_date,r.departure_date,r.status,r.nightly_rate,(r.departure_date-r.arrival_date) AS nights,((r.departure_date-r.arrival_date)*r.nightly_rate) AS room_subtotal_sar,g.full_name,rm.number FROM reservations r JOIN guests g ON g.id=r.guest_id JOIN rooms rm ON rm.id=r.room_id WHERE r.hotel_id=$1 ORDER BY r.created_at DESC LIMIT 100',[user.hotelId]);
  }
  @Post('reservations') async reserve(@Body() dto:ReservationDto,@Headers('authorization') token:string){
   const user=this.claims(token);this.authorize(user,['ADMIN','MANAGER','RECEPTIONIST']);
@@ -76,10 +76,13 @@ class OperationsController {
   try{return await this.s.transaction(async c=>{
    const r=await c.query(`SELECT rm.id,t.nightly_rate FROM rooms rm JOIN room_types t ON t.id=rm.room_type_id WHERE rm.id=$1 AND rm.hotel_id=$2 AND rm.status='AVAILABLE' FOR UPDATE OF rm`,[dto.roomId,user.hotelId]);
    if(!r.rows[0])throw new ConflictException('Room unavailable');
+   if(Number(r.rows[0].nightly_rate)<=0)throw new ConflictException('Room rate must be configured before booking');
    const block=await c.query("SELECT 1 FROM room_blocks WHERE room_id=$1 AND daterange(start_date,end_date,'[)') && daterange($2::date,$3::date,'[)') LIMIT 1",[dto.roomId,dto.arrivalDate,dto.departureDate]);
    if(block.rowCount)throw new ConflictException('Room blocked for selected dates');
    const result=await c.query('INSERT INTO reservations(hotel_id,guest_id,room_id,arrival_date,departure_date,nightly_rate) VALUES($1,$2,$3,$4,$5,$6) RETURNING *',[user.hotelId,dto.guestId,dto.roomId,dto.arrivalDate,dto.departureDate,r.rows[0].nightly_rate]);
-   await this.s.audit(c,user,'RESERVATION_CREATED',result.rows[0].id);return result.rows[0];
+   await this.s.audit(c,user,'RESERVATION_CREATED',result.rows[0].id);
+   const nights=(Date.parse(dto.departureDate+'T00:00:00Z')-Date.parse(dto.arrivalDate+'T00:00:00Z'))/86400000;
+   return {...result.rows[0],nights,roomSubtotalSar:(Number(result.rows[0].nightly_rate)*nights).toFixed(2)};
   });}catch(e:any){if(e.code==='23P01'||e.code==='23503')throw new ConflictException('Room already booked or guest invalid');throw e;}
  }
  @Post('reservations/:id/status') async changeStatus(@Param('id') id:string,@Body() dto:StatusDto,@Headers('authorization') token:string){
