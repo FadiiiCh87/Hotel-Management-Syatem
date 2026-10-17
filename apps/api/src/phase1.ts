@@ -60,6 +60,8 @@ class OperationsController {
    const count=Number((await c.query('SELECT count(*)::int AS n FROM rooms WHERE hotel_id=$1',[user.hotelId])).rows[0].n);
    const limit=Number((await c.query('SELECT expected_room_count FROM hotels WHERE id=$1',[user.hotelId])).rows[0].expected_room_count);
    if(count>=limit)throw new ConflictException('Configured 40-room capacity reached');
+   const roomType=await c.query('SELECT 1 FROM room_types WHERE id=$1 AND hotel_id=$2',[dto.roomTypeId,user.hotelId]);
+   if(!roomType.rowCount)throw new BadRequestException('Room type not found in this hotel');
    const r=await c.query('INSERT INTO rooms(hotel_id,room_type_id,number) VALUES($1,$2,$3) RETURNING *',[user.hotelId,dto.roomTypeId,dto.number]);await this.s.audit(c,user,'ROOM_CREATED',r.rows[0].id);return r.rows[0];
   });
  }
@@ -77,6 +79,8 @@ class OperationsController {
    const r=await c.query(`SELECT rm.id,t.nightly_rate FROM rooms rm JOIN room_types t ON t.id=rm.room_type_id WHERE rm.id=$1 AND rm.hotel_id=$2 AND rm.status='AVAILABLE' FOR UPDATE OF rm`,[dto.roomId,user.hotelId]);
    if(!r.rows[0])throw new ConflictException('Room unavailable');
    if(Number(r.rows[0].nightly_rate)<=0)throw new ConflictException('Room rate must be configured before booking');
+   const guest=await c.query('SELECT 1 FROM guests WHERE id=$1 AND hotel_id=$2',[dto.guestId,user.hotelId]);
+   if(!guest.rowCount)throw new BadRequestException('Guest not found in this hotel');
    const block=await c.query("SELECT 1 FROM room_blocks WHERE room_id=$1 AND daterange(start_date,end_date,'[)') && daterange($2::date,$3::date,'[)') LIMIT 1",[dto.roomId,dto.arrivalDate,dto.departureDate]);
    if(block.rowCount)throw new ConflictException('Room blocked for selected dates');
    const result=await c.query('INSERT INTO reservations(hotel_id,guest_id,room_id,arrival_date,departure_date,nightly_rate) VALUES($1,$2,$3,$4,$5,$6) RETURNING *',[user.hotelId,dto.guestId,dto.roomId,dto.arrivalDate,dto.departureDate,r.rows[0].nightly_rate]);
