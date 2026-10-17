@@ -1,4 +1,4 @@
-import { Body, CanActivate, Controller, ExecutionContext, ForbiddenException, Get, Injectable, Module, Param, Post, UnauthorizedException, UseGuards, BadRequestException, ConflictException } from '@nestjs/common';
+import { Body, CanActivate, Controller, ExecutionContext, ForbiddenException, Get, Injectable, Module, Param, Post, UnauthorizedException, UseGuards, BadRequestException, ConflictException, Req } from '@nestjs/common';
 import { Pool, PoolClient } from 'pg';
 import * as jwt from 'jsonwebtoken';
 import { IsIn, IsNotEmpty, IsNumberString, IsOptional, IsString, IsUUID, MaxLength } from 'class-validator';
@@ -77,5 +77,4 @@ class BillingController {
   });
  }
 }
-import { Req } from '@nestjs/common';
 @Module({controllers:[BillingController],providers:[BillingAuth]}) export class BillingModule {}
