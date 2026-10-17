@@ -1,6 +1,5 @@
 import { BadRequestException, ConflictException, Controller, Get, Injectable, Module, Param, Post, Body, Headers, UnauthorizedException, UseGuards, CanActivate, ExecutionContext, ForbiddenException } from '@nestjs/common';
 import { Pool, PoolClient } from 'pg';
-import { randomUUID } from 'node:crypto';
 import * as argon2 from 'argon2';
 import * as jwt from 'jsonwebtoken';
 import { IsDateString, IsEmail, IsIn, IsNotEmpty, IsOptional, IsString, IsUUID, MinLength } from 'class-validator';
@@ -28,7 +27,7 @@ class AuthGuard implements CanActivate {
 @Injectable()
 class Service {
  async query(sql:string,params:any[]=[]){return (await pool.query(sql,params)).rows;}
- async hotel(){const rows=await this.query('SELECT id,name,expected_room_count,currency,timezone FROM hotels WHERE name=$1 LIMIT 1',['PK-Hotels']);return rows[0];}
+ async hotel(hotelId:string){const rows=await this.query('SELECT id,name,expected_room_count,currency,timezone FROM hotels WHERE id=$1',[hotelId]);return rows[0];}
  async audit(c:PoolClient,user:Claims,action:string,entity:string){await c.query('INSERT INTO audit_logs(hotel_id,actor_id,action,entity_id) VALUES($1,$2,$3,$4)',[user.hotelId,user.sub,action,entity]);}
  async transaction<T>(fn:(c:PoolClient)=>Promise<T>):Promise<T>{const c=await pool.connect();try{await c.query('BEGIN');const result=await fn(c);await c.query('COMMIT');return result;}catch(e){await c.query('ROLLBACK');throw e;}finally{c.release();}}
 }
@@ -46,8 +45,8 @@ class AuthController {
 class OperationsController {
  constructor(private s:Service){}
  private authorize(user:Claims,roles:string[]){if(!roles.includes(user.role))throw new ForbiddenException();}
- @Get('hotel') async hotel(){return this.s.hotel();}
- @Get('rooms') async rooms(@Headers('authorization') _token:string){return this.s.query('SELECT r.id,r.number,r.status,t.name AS room_type,t.nightly_rate FROM rooms r JOIN room_types t ON t.id=r.room_type_id ORDER BY r.number');}
+ @Get('hotel') async hotel(@Headers('authorization') token:string){return this.s.hotel(this.claims(token).hotelId);}
+ @Get('rooms') async rooms(@Headers('authorization') token:string){const user=this.claims(token);return this.s.query('SELECT r.id,r.number,r.status,t.name AS room_type,t.nightly_rate FROM rooms r JOIN room_types t ON t.id=r.room_type_id WHERE r.hotel_id=$1 ORDER BY r.number',[user.hotelId]);}
  @Post('room-types') async roomType(@Body() dto:RoomTypeDto,@Headers('authorization') token:string){
   const user=this.claims(token);this.authorize(user,['ADMIN','MANAGER']);
   const capacity=Number(dto.capacity),rate=Number(dto.nightlyRate);
@@ -73,7 +72,7 @@ class OperationsController {
  }
  @Post('reservations') async reserve(@Body() dto:ReservationDto,@Headers('authorization') token:string){
   const user=this.claims(token);this.authorize(user,['ADMIN','MANAGER','RECEPTIONIST']);
-  if(!/^\\d{4}-\\d{2}-\\d{2}$/.test(dto.arrivalDate)||!/^\\d{4}-\\d{2}-\\d{2}$/.test(dto.departureDate)||dto.arrivalDate>=dto.departureDate)throw new BadRequestException('Invalid stay dates');
+  if(!/^\d{4}-\d{2}-\d{2}$/.test(dto.arrivalDate)||!/^\d{4}-\d{2}-\d{2}$/.test(dto.departureDate)||dto.arrivalDate>=dto.departureDate)throw new BadRequestException('Invalid stay dates');
   try{return await this.s.transaction(async c=>{
    const r=await c.query(`SELECT rm.id,t.nightly_rate FROM rooms rm JOIN room_types t ON t.id=rm.room_type_id WHERE rm.id=$1 AND rm.hotel_id=$2 AND rm.status='AVAILABLE' FOR UPDATE OF rm`,[dto.roomId,user.hotelId]);
    if(!r.rows[0])throw new ConflictException('Room unavailable');
