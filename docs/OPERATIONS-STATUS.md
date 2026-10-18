@@ -26,10 +26,26 @@ Verified on 18 October 2026:
 - Updated code build and all 41 isolated checks passed, including GitHub CI.
 - Live frontend login page rendered in the cloud browser. Browser sign-in and signed-in desktop/mobile visual QA remain unverified.
 
-Live mutation smoke tests were blocked by automatic approval review because creating synthetic guests, bookings, charges and payment records in production requires explicit authorization and a complete cleanup plan. No synthetic guest, reservation, block, folio or payment was created. Concurrent transaction testing against live infrastructure remains pending.
+## Approved live workflow smoke test
+On 18 October 2026, after explicit approval for temporary production test entries, 26 live checks passed through the deployed API:
+- Admin sign-in and protected hotel/room reads.
+- Two simultaneous overlapping booking attempts: exactly one created, one rejected.
+- Booking versus maintenance block race: exactly one created, one rejected.
+- Dated availability excludes the reserved room.
+- Check-in succeeds for a ready room within the stay dates.
+- Checkout is blocked before a folio is opened and settled.
+- Opening a folio twice returns the same guest account.
+- Room charges, service charges and discounts reconcile correctly.
+- Overpayment is rejected; replaying the same payment records it once.
+- A settled checkout closes the folio and marks the room CLEANING.
+- Closed folios reject additional payments.
+- Housekeeping restores the test room to AVAILABLE.
+- Statement preview leaves VAT unconfigured and is not an official tax invoice.
+
+No real payment was processed. The single marked test guest, its reservation and folio, synthetic charges/payment and temporary maintenance block were deleted with marker/ownership checks in a transaction. Follow-up SQL verified zero remaining test guest, reservation, folio, payment and block records, with all 40 rooms AVAILABLE. Physical-room status audit history was retained.
 
 VAT status remains UNCONFIRMED. Statements are explicitly drafts, tax values are not invented, and official tax invoice issuance stays disabled.
 
 ## Operational review still required
-Confirm room capacities, backup/restore capability, staff access requirements and real hotel user acceptance. Production concurrency tests and final desktop/mobile visual verification remain open. See RELEASE-GATE.md; this update does not assert that every release gate has passed.
+Confirm room capacities, backup/restore capability, staff access requirements and real hotel user acceptance. Live concurrency smoke tests passed; broader load testing, restore drills and signed-in desktop/mobile visual verification remain open. See RELEASE-GATE.md; this update does not assert that every release gate has passed.
 
