@@ -1,13 +1,11 @@
+import { authenticateStaff } from './staff-auth';
 import { Controller, Get, Module, Param, Req, UseGuards, CanActivate, ExecutionContext, Injectable, UnauthorizedException, BadRequestException, ParseUUIDPipe } from '@nestjs/common';
 import { Pool } from 'pg';
 import * as jwt from 'jsonwebtoken';
 const pool=new Pool({connectionString:process.env.DATABASE_URL,max:3,connectionTimeoutMillis:5000,idleTimeoutMillis:30000,ssl:process.env.PGSSL==='true'?{rejectUnauthorized:true,ca:process.env.PGSSL_CA||undefined}:undefined});
 type Staff={sub:string;hotelId:string;role:string};
 @Injectable() class DraftAuth implements CanActivate {
- async canActivate(ctx:ExecutionContext){const req=ctx.switchToHttp().getRequest();const auth=String(req.headers.authorization||'');
- if(!auth.startsWith('Bearer '))throw new UnauthorizedException();
- try{req.staff=jwt.verify(auth.slice(7),process.env.JWT_SECRET!,{algorithms:['HS256'],issuer:'pk-hotels-api',audience:'pk-hotels-staff'}) as Staff;const active=await pool.query('SELECT 1 FROM staff WHERE id=$1 AND hotel_id=$2 AND active=true AND role=$3',[req.staff.sub,req.staff.hotelId,req.staff.role]);if(!active.rowCount)throw new UnauthorizedException();return true;}
- catch{throw new UnauthorizedException();}}
+ async canActivate(ctx:ExecutionContext){const req=ctx.switchToHttp().getRequest();req.staff=(await authenticateStaff(pool,req.headers.authorization||'')).user;return true;}
 }
 @Controller('tax-and-invoices') @UseGuards(DraftAuth)
 class TaxInvoiceController {

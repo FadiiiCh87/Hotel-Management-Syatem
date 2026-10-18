@@ -1,8 +1,9 @@
-import { BadRequestException, ConflictException, Controller, Get, Injectable, Module, Param, Post, Body, Headers, UnauthorizedException, UseGuards, CanActivate, ExecutionContext, ForbiddenException, Query, ParseUUIDPipe } from '@nestjs/common';
+import { authenticateStaff } from './staff-auth';
+import { BadRequestException, ConflictException, Controller, Get, Injectable, Module, Param, Post, Body, Headers, UnauthorizedException, UseGuards, CanActivate, ExecutionContext, ForbiddenException, Query, ParseUUIDPipe, Req } from '@nestjs/common';
 import { Pool, PoolClient } from 'pg';
 import * as argon2 from 'argon2';
 import * as jwt from 'jsonwebtoken';
-import { IsDateString, IsEmail, IsIn, IsNotEmpty, IsOptional, IsString, IsUUID, MinLength, MaxLength } from 'class-validator';
+import { IsBoolean, IsDateString, IsEmail, IsIn, IsNotEmpty, IsOptional, IsString, IsUUID, MinLength, MaxLength } from 'class-validator';
 
 const pool = new Pool({connectionString:process.env.DATABASE_URL, max:3, connectionTimeoutMillis:5000, idleTimeoutMillis:30000, ssl:process.env.PGSSL==='true'?{rejectUnauthorized:true,ca:process.env.PGSSL_CA||undefined}:undefined});
 const secret=()=>{if(!process.env.JWT_SECRET||process.env.JWT_SECRET.length<32)throw new Error('JWT_SECRET must be at least 32 characters');return process.env.JWT_SECRET;};
@@ -16,15 +17,12 @@ class RateDto { @IsString() nightlyRate!:string; }
 class BlockDto { @IsUUID() roomId!:string; @IsDateString() startDate!:string; @IsDateString() endDate!:string; @IsString() @IsNotEmpty() @MaxLength(200) reason!:string; }
 class StatusDto { @IsIn(['CONFIRMED','CHECKED_IN','CHECKED_OUT','CANCELLED','NO_SHOW']) status!:string; }
 
-type Claims={sub:string;hotelId:string;role:string};
+type Claims={sub:string;hotelId:string;role:string;sessionVersion?:number};
 @Injectable()
 class AuthGuard implements CanActivate {
  async canActivate(context:ExecutionContext):Promise<boolean> {
   const req=context.switchToHttp().getRequest();
-  const bearer=req.headers.authorization||'';
-  if(!bearer.startsWith('Bearer '))throw new UnauthorizedException();
-  try {req.user=jwt.verify(bearer.slice(7),secret(),{algorithms:['HS256'],issuer:'pk-hotels-api',audience:'pk-hotels-staff'}) as Claims;const active=await pool.query('SELECT 1 FROM staff WHERE id=$1 AND hotel_id=$2 AND active=true AND role=$3',[req.user.sub,req.user.hotelId,req.user.role]);if(!active.rowCount)throw new UnauthorizedException();return true;}
-  catch {throw new UnauthorizedException('Invalid or expired token');}
+  const result=await authenticateStaff(pool,req.headers.authorization||'',context.getClass().name==='AuthController');req.user=result.user;req.profile=result.profile;return true;
  }
 }
 @Injectable()
@@ -34,15 +32,56 @@ class Service {
  async audit(c:PoolClient,user:Claims,action:string,entity:string){await c.query('INSERT INTO audit_logs(hotel_id,actor_id,action,entity_id) VALUES($1,$2,$3,$4)',[user.hotelId,user.sub,action,entity]);}
  async transaction<T>(fn:(c:PoolClient)=>Promise<T>):Promise<T>{const c=await pool.connect();try{await c.query('BEGIN');const result=await fn(c);await c.query('COMMIT');return result;}catch(e){await c.query('ROLLBACK');throw e;}finally{c.release();}}
 }
+class PasswordDto { @IsString() @IsNotEmpty() @MaxLength(128) currentPassword!:string; @IsString() @MinLength(12) @MaxLength(128) newPassword!:string; }
+class CreateStaffDto { @IsString() @MinLength(2) @MaxLength(160) fullName!:string; @IsEmail() @MaxLength(254) email!:string; @IsIn(['ADMIN','MANAGER','RECEPTIONIST']) role!:string; @IsString() @MinLength(12) @MaxLength(128) temporaryPassword!:string; }
+class UpdateStaffDto { @IsString() @MinLength(2) @MaxLength(160) fullName!:string; @IsIn(['ADMIN','MANAGER','RECEPTIONIST']) role!:string; @IsBoolean() active!:boolean; }
+class ResetStaffDto { @IsString() @MinLength(12) @MaxLength(128) temporaryPassword!:string; }
+@Controller('staff') @UseGuards(AuthGuard)
+class StaffController {
+ constructor(private s:Service){}
+ private admin(req:any){if(req.user.role!=='ADMIN')throw new ForbiddenException('Administrator access required');return req.user as Claims;}
+ @Get() async list(@Req() req:any){const u=this.admin(req);return this.s.query('SELECT id,full_name,email,role,active,must_change_password,created_at FROM staff WHERE hotel_id=$1 ORDER BY created_at,id',[u.hotelId]);}
+ @Post() async create(@Req() req:any,@Body() dto:CreateStaffDto){
+  const u=this.admin(req);if(!dto.fullName.trim())throw new BadRequestException('Full name required');const hash=await argon2.hash(dto.temporaryPassword);
+  try{return await this.s.transaction(async c=>{const r=await c.query('INSERT INTO staff(hotel_id,full_name,email,password_hash,role,must_change_password) VALUES($1,$2,$3,$4,$5,true) RETURNING id,full_name,email,role,active,must_change_password',[u.hotelId,dto.fullName.trim(),dto.email.trim().toLowerCase(),hash,dto.role]);await this.s.audit(c,u,'STAFF_CREATED',r.rows[0].id);return r.rows[0];});}catch(e:any){if(e.code==='23505')throw new ConflictException('Email is already in use');throw e;}
+ }
+ @Post(':id/access') async access(@Req() req:any,@Param('id',new ParseUUIDPipe()) id:string,@Body() dto:UpdateStaffDto){
+  const u=this.admin(req);if(!dto.fullName.trim())throw new BadRequestException('Full name required');
+  if(id===u.sub&&(!dto.active||dto.role!=='ADMIN'))throw new ConflictException('You cannot disable or demote your own administrator account');
+  return this.s.transaction(async c=>{
+   // Serialize staff access changes within this hotel, then recheck the acting administrator.
+   await c.query('SELECT pg_advisory_xact_lock(hashtext($1))',[u.hotelId]);
+   const actor=await c.query("SELECT 1 FROM staff WHERE id=$1 AND hotel_id=$2 AND active=true AND role='ADMIN'",[u.sub,u.hotelId]);if(!actor.rowCount)throw new ForbiddenException();
+   const r=await c.query('UPDATE staff SET full_name=$1,role=$2,active=$3,session_version=session_version+CASE WHEN role<>$2 OR active<>$3 THEN 1 ELSE 0 END WHERE id=$4 AND hotel_id=$5 RETURNING id,full_name,email,role,active,must_change_password',[dto.fullName.trim(),dto.role,dto.active,id,u.hotelId]);
+   if(!r.rowCount)throw new BadRequestException('Staff member not found');await this.s.audit(c,u,'STAFF_ACCESS_UPDATED',id);return r.rows[0];
+  });
+ }
+ @Post(':id/reset-password') async reset(@Req() req:any,@Param('id',new ParseUUIDPipe()) id:string,@Body() dto:ResetStaffDto){
+  const u=this.admin(req);if(id===u.sub)throw new BadRequestException('Use My account to change your own password');const hash=await argon2.hash(dto.temporaryPassword);
+  return this.s.transaction(async c=>{const r=await c.query('UPDATE staff SET password_hash=$1,must_change_password=true,session_version=session_version+1 WHERE id=$2 AND hotel_id=$3 RETURNING id',[hash,id,u.hotelId]);if(!r.rowCount)throw new BadRequestException('Staff member not found');await this.s.audit(c,u,'STAFF_PASSWORD_RESET',id);return {id,signInRequired:true};});
+ }
+}
 @Controller('auth')
 class AuthController {
  constructor(private s:Service){}
  @Post('login') async login(@Body() body:LoginDto){
   secret();
-  const rows=await this.s.query('SELECT id,hotel_id,email,password_hash,role FROM staff WHERE lower(email)=lower($1) AND active=true',[body.email]);
+  const rows=await this.s.query('SELECT id,hotel_id,email,password_hash,role,session_version,must_change_password FROM staff WHERE lower(email)=lower($1) AND active=true',[body.email]);
   const staff=rows[0];if(!staff||!(await argon2.verify(staff.password_hash,body.password).catch(()=>false)))throw new UnauthorizedException('Invalid credentials');
-  return {accessToken:jwt.sign({sub:staff.id,hotelId:staff.hotel_id,role:staff.role},secret(),{expiresIn:'30m',issuer:'pk-hotels-api',audience:'pk-hotels-staff',algorithm:'HS256'}),tokenType:'Bearer',expiresIn:1800};
+  return {accessToken:jwt.sign({sub:staff.id,hotelId:staff.hotel_id,role:staff.role,sessionVersion:staff.session_version},secret(),{expiresIn:'30m',issuer:'pk-hotels-api',audience:'pk-hotels-staff',algorithm:'HS256'}),tokenType:'Bearer',expiresIn:1800};
  }
+ @Get('me') @UseGuards(AuthGuard) async me(@Req() req:any){return req.profile;}
+ @Post('password') @UseGuards(AuthGuard) async password(@Req() req:any,@Body() dto:PasswordDto){
+  const hash=await argon2.hash(dto.newPassword);
+  return this.s.transaction(async c=>{
+   const r=await c.query('SELECT password_hash,session_version FROM staff WHERE id=$1 AND hotel_id=$2 FOR UPDATE',[req.user.sub,req.user.hotelId]);
+   if(!r.rowCount||r.rows[0].session_version!==(req.user.sessionVersion??0)||!(await argon2.verify(r.rows[0].password_hash,dto.currentPassword).catch(()=>false)))throw new UnauthorizedException('Current password is incorrect or session has changed');
+   if(await argon2.verify(r.rows[0].password_hash,dto.newPassword))throw new BadRequestException('Choose a different password');
+   await c.query('UPDATE staff SET password_hash=$1,must_change_password=false,session_version=session_version+1 WHERE id=$2 AND hotel_id=$3',[hash,req.user.sub,req.user.hotelId]);
+   await this.s.audit(c,req.user,'STAFF_PASSWORD_CHANGED',req.user.sub);return {signInRequired:true};
+  });
+ }
+
 }
 @Controller('operations')
 @UseGuards(AuthGuard)
@@ -151,5 +190,5 @@ class OperationsController {
  }
  private claims(token:string):Claims{return jwt.verify(token.slice(7),secret(),{algorithms:['HS256'],issuer:'pk-hotels-api',audience:'pk-hotels-staff'}) as Claims;}
 }
-@Module({providers:[Service,AuthGuard],controllers:[AuthController,OperationsController]})
+@Module({providers:[Service,AuthGuard],controllers:[AuthController,OperationsController,StaffController]})
 export class Phase1Module {}
