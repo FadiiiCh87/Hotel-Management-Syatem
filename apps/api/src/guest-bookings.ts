@@ -1,5 +1,5 @@
 import { BadRequestException, Body, CanActivate, ConflictException, Controller, ExecutionContext, Get, Injectable, Module, Param, ParseUUIDPipe, Post, Req, UnauthorizedException, UseGuards } from '@nestjs/common';
-import { IsBoolean, IsDateString, IsEmail, IsIn, IsInt, IsNotEmpty, IsString, IsUUID, MaxLength, Min, MinLength } from 'class-validator';
+import { IsBoolean, IsDateString, IsEmail, IsIn, IsInt, IsNotEmpty, IsOptional, IsString, IsUUID, MaxLength, Min, MinLength } from 'class-validator';
 import { Pool, PoolClient } from 'pg';
 import * as argon2 from 'argon2';
 import * as jwt from 'jsonwebtoken';
@@ -33,6 +33,22 @@ const requestSelect=`SELECT q.id,q.room_type_id,t.name AS room_type,q.arrival_da
 @Injectable() class ReceptionAuth implements CanActivate {
  async canActivate(ctx:ExecutionContext){const req=ctx.switchToHttp().getRequest();req.staff=(await authenticateStaff(pool,req.headers.authorization||'')).user;return true;}
 }
+class ContactDto {
+ @IsString() @MinLength(2) @MaxLength(160) fullName!:string;
+ @IsEmail() @MaxLength(254) email!:string;
+ @IsOptional() @IsString() @MaxLength(40) phone?:string;
+ @IsIn(['Planning a stay','Existing booking request','Payment question','Other enquiry']) subject!:string;
+ @IsString() @MinLength(10) @MaxLength(2000) message!:string;
+ @IsOptional() @IsString() @MaxLength(0) website?:string;
+}
+@Controller('public') class PublicHotelController {
+ @Get('room-types') async roomTypes(){return (await pool.query("SELECT t.id,t.name,t.nightly_rate FROM room_types t JOIN hotels h ON h.id=t.hotel_id WHERE h.name='PK-Hotels' AND t.nightly_rate>0 ORDER BY t.nightly_rate,t.name")).rows;}
+ @Post('contact') async contact(@Body() body:ContactDto){
+  if(body.fullName.trim().length<2||body.message.trim().length<10)throw new BadRequestException('Enter your name and a message of at least 10 characters');
+  const r=await pool.query("INSERT INTO hotel_contact_enquiries(hotel_id,full_name,email,phone,subject,message) SELECT id,$1,$2,$3,$4,$5 FROM hotels WHERE name='PK-Hotels' RETURNING id",[body.fullName.trim(),body.email.toLowerCase(),body.phone?.trim()||null,body.subject,body.message.trim()]);
+  if(!r.rowCount)throw new BadRequestException('Reception is unavailable. Please try again later.');return {reference:r.rows[0].id,deliveredTo:'RECEPTION_INBOX'};
+ }
+}
 @Controller('guest') class GuestController {
  @Post('register') async register(@Body() b:RegisterDto){
   if(b.password.length<12||!b.fullName.trim()||b.phone.trim().length<5)throw new BadRequestException('Enter a name, phone and password of at least 12 characters');
@@ -62,6 +78,8 @@ const requestSelect=`SELECT q.id,q.room_type_id,t.name AS room_type,q.arrival_da
 }
 @Controller('booking-requests') @UseGuards(ReceptionAuth) class ReceptionRequestsController {
  @Get() async list(@Req() req:any){const u=req.staff;return (await pool.query(`SELECT q.*,c.full_name,c.email,c.phone,t.name AS room_type,rm.number AS room_number,COALESCE(rd.seen_version,0)<q.notification_version AS unread FROM booking_requests q JOIN customer_accounts c ON c.id=q.customer_id AND c.hotel_id=q.hotel_id JOIN room_types t ON t.id=q.room_type_id AND t.hotel_id=q.hotel_id LEFT JOIN reservations r ON r.id=q.reservation_id AND r.hotel_id=q.hotel_id LEFT JOIN rooms rm ON rm.id=r.room_id AND rm.hotel_id=q.hotel_id LEFT JOIN booking_request_reads rd ON rd.request_id=q.id AND rd.staff_id=$2 AND rd.hotel_id=q.hotel_id WHERE q.hotel_id=$1 ORDER BY q.updated_at DESC LIMIT 200`,[u.hotelId,u.sub])).rows;}
+ @Get('enquiries') async enquiries(@Req() req:any){return (await pool.query('SELECT id,full_name,email,phone,subject,message,created_at,read_at FROM hotel_contact_enquiries WHERE hotel_id=$1 ORDER BY created_at DESC LIMIT 200',[req.staff.hotelId])).rows;}
+ @Post('enquiries/:id/read') async readEnquiry(@Req() req:any,@Param('id',new ParseUUIDPipe()) id:string){return tx(async c=>{const r=await c.query('UPDATE hotel_contact_enquiries SET read_at=COALESCE(read_at,now()),read_by=COALESCE(read_by,$1) WHERE id=$2 AND hotel_id=$3 RETURNING id',[req.staff.sub,id,req.staff.hotelId]);if(!r.rowCount)throw new BadRequestException('Enquiry not found');await audit(c,req.staff,'CONTACT_ENQUIRY_READ',id);return {read:true};});}
  @Post('read') async read(@Req() req:any,@Body() b:ReadDto){const u=req.staff;const r=await pool.query('INSERT INTO booking_request_reads(hotel_id,staff_id,request_id,seen_version) SELECT hotel_id,$1,id,LEAST(notification_version,$2) FROM booking_requests WHERE id=$3 AND hotel_id=$4 ON CONFLICT(staff_id,request_id) DO UPDATE SET seen_version=GREATEST(booking_request_reads.seen_version,EXCLUDED.seen_version) RETURNING request_id',[u.sub,b.version,b.requestId,u.hotelId]);if(!r.rowCount)throw new BadRequestException('Request not found');return {read:true};}
  @Post(':id/approve') async approve(@Req() req:any,@Param('id',new ParseUUIDPipe()) id:string){const u=req.staff;return tx(async c=>{const r=await c.query("UPDATE booking_requests SET status='AWAITING_PAYMENT',reviewed_by=$1,updated_at=now() WHERE id=$2 AND hotel_id=$3 AND status='PENDING_REVIEW' RETURNING id,status",[u.sub,id,u.hotelId]);if(!r.rowCount)throw new ConflictException('Pending request required');await audit(c,u,'BOOKING_REQUEST_APPROVED',id);return r.rows[0];});}
  @Post(':id/reject') async reject(@Req() req:any,@Param('id',new ParseUUIDPipe()) id:string,@Body() b:RejectDto){const u=req.staff;if(b.reason.trim().length<3)throw new BadRequestException('Rejection reason required');return tx(async c=>{const r=await c.query("UPDATE booking_requests SET status='REJECTED',decision_note=$1,reviewed_by=$2,updated_at=now() WHERE id=$3 AND hotel_id=$4 AND status IN ('PENDING_REVIEW','AWAITING_PAYMENT','PAYMENT_REVIEW') RETURNING id,status",[b.reason.trim(),u.sub,id,u.hotelId]);if(!r.rowCount)throw new ConflictException('Open request required');await audit(c,u,'BOOKING_REQUEST_REJECTED',id);return r.rows[0];});}
@@ -88,4 +106,4 @@ const requestSelect=`SELECT q.id,q.room_type_id,t.name AS room_type,q.arrival_da
   });}catch(e:any){if(e.code==='23P01')throw new ConflictException('Room was booked by another reservation. Select another room.');if(e.code==='23505')throw new ConflictException('Payment reference has already been recorded. Check the existing booking.');throw e;}
  }
 }
-@Module({controllers:[GuestController,ReceptionRequestsController],providers:[CustomerAuth,ReceptionAuth]}) export class GuestBookingModule {}
+@Module({controllers:[GuestController,ReceptionRequestsController,PublicHotelController],providers:[CustomerAuth,ReceptionAuth]}) export class GuestBookingModule {}

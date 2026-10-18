@@ -1,0 +1,7 @@
+import Link from 'next/link';
+import type { Metadata } from 'next';
+import BookingForm from '../../../components/booking-form';
+import { BookingSteps } from '../../../components/public-site';
+import s from '../../../components/public-site.module.css';
+export const metadata:Metadata={title:'Book your stay',description:'Choose your dates and room category, then send your PK-Hotels booking request through the guest portal.',alternates:{canonical:'/booking'}};
+export default function Booking(){return <><div className={s.breadcrumbs}><Link href="/">Home</Link> / Booking</div><section className={s.pageIntro}><span className={s.eyebrow}>YOUR NEXT CHAPTER STARTS HERE</span><h1>A few details.<br/><em>A stay to look forward to.</em></h1><p>Tell us when you’re coming and which room category you have in mind. We’ll take it from there, one clear step at a time.</p></section><section className={`${s.section} ${s.bookingLayout}`}><BookingForm/><aside className={s.bookingAside}><span className={s.eyebrow}>GOOD TO KNOW</span><h2>From your first request<br/>to <em>your room number.</em></h2><BookingSteps/><div className={s.softNotice}>Your room is allocated only after reception verifies receipt of the full quoted advance and checks availability. Online card processing is not connected. Rates are in SAR, before tax; VAT registration remains unconfirmed.</div><Link href="/contact" className={s.textLink}>A question before booking? Contact us →</Link></aside></section></>;}

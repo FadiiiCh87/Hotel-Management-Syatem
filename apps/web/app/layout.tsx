@@ -1,5 +1,3 @@
 import type { Metadata } from 'next';
-export const metadata: Metadata = {title:'PK-Hotels | Management',description:'PK-Hotels staff management portal'};
-export default function RootLayout({children}:{children:React.ReactNode}) {
- return <html lang="en"><body style={{margin:0,fontFamily:'Arial, sans-serif',background:'#f5f7fb',color:'#17243a'}}>{children}</body></html>;
-}
+export const metadata:Metadata={metadataBase:new URL('https://pk-hotels-web.onrender.com'),title:{default:'PK-Hotels | A warmer welcome',template:'%s | PK-Hotels'},description:'Explore PK-Hotels, discover our room categories and plan your next stay.',openGraph:{type:'website',siteName:'PK-Hotels',title:'PK-Hotels | A warmer welcome',description:'Discover your next stay at PK-Hotels.',images:[{url:'/images/pk-hotels-exterior.webp',width:1536,height:1024,alt:'PK-Hotels exterior brand concept'}]},icons:{icon:'/icon.svg'}};
+export default function RootLayout({children}:{children:React.ReactNode}){return <html lang="en"><body style={{margin:0,fontFamily:'Arial, sans-serif',background:'#f5f7fb',color:'#17243a'}}>{children}</body></html>;}

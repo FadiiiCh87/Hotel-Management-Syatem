@@ -9,7 +9,7 @@
 - `/api/v1/health/ready` checks required configuration and actual database connectivity.
 
 ## Validation
-- `npm test`: 159 HTTP checks against isolated PGlite PostgreSQL with actual schema, constraints and SQL. Includes duplicate booking, block conflicts, balances, idempotency, overpayment, checkout, rate snapshots, revoked staff, role restrictions and unconfirmed VAT. PGlite adapter serializes a single database; this is not a production connection-pool or concurrent transaction load test.
+- `npm test`: 170 HTTP checks against isolated PGlite PostgreSQL with actual schema, constraints and SQL. Includes duplicate booking, block conflicts, balances, idempotency, overpayment, checkout, rate snapshots, revoked staff, role restrictions and unconfirmed VAT. PGlite adapter serializes a single database; this is not a production connection-pool or concurrent transaction load test.
 - Production frontend and backend builds passed.
 - Live login screen rendered in the cloud browser; signed-in desktop/mobile visual QA remains open.
 
@@ -70,3 +70,13 @@ Confirm room capacities, backup/restore capability, staff roster and real hotel 
 - Additive migration: `supabase/migrations/20261018202417_guest_booking_requests.sql`; all new tables use hotel-scoped runtime RLS, with no anon/authenticated Data API grants.
 - 159 isolated HTTP checks cover customer/staff token separation, ownership, cross-hotel denial, approval without allocation, payment-reference notifications, partial/excess advance refusal, duplicate-reference rollback, maintenance and overlap conflicts, saved rates, paid allocation, cancellation/rejection and request limits. Frontend and API builds passed. These tests do not process actual payments.
 - Account email verification/recovery, payment gateway setup, and closed-browser push delivery are separate integrations and are not claimed as implemented.
+
+## Public hotel website — 19 October 2026 (Riyadh)
+- Home `/`, About `/about`, Rooms `/rooms`, Contact `/contact`, Booking `/booking` and Staff login/dashboard `/staff`. Existing guest portal remains `/guest`.
+- User-supplied lobby and exterior visuals are optimized as WebP, with responsive Next Image loading, gallery, coordinated stone/gold branding, mobile navigation, skip link and reduced-motion support.
+- Home date/category search carries choices through the Booking page and guest sign-in into the booking request form. No reservation/payment is created by the public planning forms.
+- Public room rates come from the existing room catalogue API; no room amenities, street address, telephone, hotel email, star ratings, testimonials or breakfast/pool claims were invented.
+- Contact messages are persisted in a hotel-scoped enquiry inbox for authorized reception staff. The form returns a reference only after saving. Validation, a honeypot, request limiting, RLS and customer/staff access restrictions are implemented. No email is automatically sent.
+- Added room-selection guidance, booking steps, FAQs, public metadata, social preview, favicon, sitemap and robots exclusions for staff/guest pages. Image captions identify brand concept imagery.
+- 170 isolated API checks pass, including public rates, contact delivery, validation, unauthorized inbox access and cross-hotel isolation, plus the previous booking/payment/staff checks. Both production builds passed.
+- Official hotel contact details and room-specific features remain to be supplied by the owner. No online payment gateway or verified VAT tax configuration is claimed.

@@ -11,6 +11,7 @@ const argon2=require('argon2');
  for(const f of ['phase1.sql','phase2-billing.sql','phase2-tax-safety.sql','seed-pk-hotels-rooms.sql'])await db.exec(fs.readFileSync('apps/api/prisma/'+f,'utf8'));
  await db.exec(fs.readFileSync('supabase/migrations/20261018195112_staff_management.sql','utf8'));
  await db.exec(fs.readFileSync('supabase/migrations/20261018202417_guest_booking_requests.sql','utf8'));
+ await db.exec(fs.readFileSync('supabase/migrations/20261018213839_hotel_contact_enquiries.sql','utf8'));
  const hotel=(await db.query('SELECT id FROM hotels')).rows[0].id;
  const hash=await argon2.hash('Test-Only-Password-123');
  await db.query("INSERT INTO staff(hotel_id,email,password_hash,role) VALUES($1,'test@example.com',$2,'ADMIN')",[hotel,hash]);
@@ -203,6 +204,21 @@ const argon2=require('argon2');
  for(let i=0;i<5;i++)await request('/guest/requests',requestBody,201);
  await request('/guest/requests',requestBody,409);token=adminToken;
 
+
+ // Public contact messages reach the protected reception inbox, never public reads.
+ token='';const publicRooms=await request('/public/room-types');assert.equal(publicRooms.length,4);assert(publicRooms.every(r=>!('hotel_id' in r)));
+ const enquiry={fullName:'Website guest',email:'enquiry@example.com',phone:'0500012345',subject:'Planning a stay',message:'Please help me plan a room for my next visit.',website:''};
+ await request('/public/contact',{...enquiry,message:'short'},400);
+ await request('/public/contact',{...enquiry,website:'spam.example'},400);
+ const receipt=await request('/public/contact',enquiry,201);assert.equal(receipt.deliveredTo,'RECEPTION_INBOX');
+ await request('/booking-requests/enquiries',undefined,401);
+ token=customerToken;await request('/booking-requests/enquiries',undefined,401);
+ token=adminToken;const inbox=await request('/booking-requests/enquiries');assert.equal(inbox[0].message,enquiry.message);assert.equal(inbox[0].id,receipt.reference);
+ await request('/booking-requests/enquiries/'+receipt.reference+'/read',{},201);
+ assert((await request('/booking-requests/enquiries'))[0].read_at);
+ const outsideEnquiry=(await db.query("INSERT INTO hotel_contact_enquiries(hotel_id,full_name,email,subject,message) VALUES($1,'Other hotel guest','other-enquiry@example.com','Other enquiry','Cross hotel message test') RETURNING id",[otherHotel])).rows[0];
+ await request('/booking-requests/enquiries/'+outsideEnquiry.id+'/read',{},400);
+ assert(!(await request('/booking-requests/enquiries')).some(x=>x.id===outsideEnquiry.id));
  const staffId=(await db.query("SELECT id FROM staff WHERE email='test@example.com'")).rows[0].id;
  await db.query("UPDATE staff SET role='RECEPTIONIST' WHERE id=$1",[staffId]);
  await request('/operations/rooms',undefined,401);
