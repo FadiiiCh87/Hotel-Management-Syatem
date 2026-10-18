@@ -1,7 +1,7 @@
 import { Controller, Get, Module, Param, Req, UseGuards, CanActivate, ExecutionContext, Injectable, UnauthorizedException, BadRequestException, ParseUUIDPipe } from '@nestjs/common';
 import { Pool } from 'pg';
 import * as jwt from 'jsonwebtoken';
-const pool=new Pool({connectionString:process.env.DATABASE_URL,max:3,connectionTimeoutMillis:5000,idleTimeoutMillis:30000,ssl:process.env.PGSSL==='true'?{rejectUnauthorized:true}:undefined});
+const pool=new Pool({connectionString:process.env.DATABASE_URL,max:3,connectionTimeoutMillis:5000,idleTimeoutMillis:30000,ssl:process.env.PGSSL==='true'?{rejectUnauthorized:true,ca:process.env.PGSSL_CA||undefined}:undefined});
 type Staff={sub:string;hotelId:string;role:string};
 @Injectable() class DraftAuth implements CanActivate {
  async canActivate(ctx:ExecutionContext){const req=ctx.switchToHttp().getRequest();const auth=String(req.headers.authorization||'');

@@ -3,7 +3,7 @@ import { Pool, PoolClient } from 'pg';
 import * as jwt from 'jsonwebtoken';
 import { IsIn, IsNotEmpty, IsNumberString, IsOptional, IsString, IsUUID, MaxLength } from 'class-validator';
 
-const pool=new Pool({connectionString:process.env.DATABASE_URL,max:3,connectionTimeoutMillis:5000,idleTimeoutMillis:30000,ssl:process.env.PGSSL==='true'?{rejectUnauthorized:true}:undefined});
+const pool=new Pool({connectionString:process.env.DATABASE_URL,max:3,connectionTimeoutMillis:5000,idleTimeoutMillis:30000,ssl:process.env.PGSSL==='true'?{rejectUnauthorized:true,ca:process.env.PGSSL_CA||undefined}:undefined});
 type Staff={sub:string;hotelId:string;role:string};
 @Injectable() class BillingAuth implements CanActivate {
  async canActivate(ctx:ExecutionContext){const req=ctx.switchToHttp().getRequest();const auth=String(req.headers.authorization||'');

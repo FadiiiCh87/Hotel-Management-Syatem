@@ -4,7 +4,7 @@ import * as argon2 from 'argon2';
 import * as jwt from 'jsonwebtoken';
 import { IsDateString, IsEmail, IsIn, IsNotEmpty, IsOptional, IsString, IsUUID, MinLength, MaxLength } from 'class-validator';
 
-const pool = new Pool({connectionString:process.env.DATABASE_URL, max:3, connectionTimeoutMillis:5000, idleTimeoutMillis:30000, ssl:process.env.PGSSL==='true'?{rejectUnauthorized:true}:undefined});
+const pool = new Pool({connectionString:process.env.DATABASE_URL, max:3, connectionTimeoutMillis:5000, idleTimeoutMillis:30000, ssl:process.env.PGSSL==='true'?{rejectUnauthorized:true,ca:process.env.PGSSL_CA||undefined}:undefined});
 const secret=()=>{if(!process.env.JWT_SECRET||process.env.JWT_SECRET.length<32)throw new Error('JWT_SECRET must be at least 32 characters');return process.env.JWT_SECRET;};
 class LoginDto { @IsEmail() email!:string; @IsString() @IsNotEmpty() password!:string; }
 class GuestDto { @IsString() @IsNotEmpty() @MaxLength(160) fullName!:string; @IsOptional() @IsString() @MaxLength(40) phone?:string; @IsOptional() @IsEmail() email?:string; }
