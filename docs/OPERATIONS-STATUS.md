@@ -9,7 +9,7 @@
 - `/api/v1/health/ready` checks required configuration and actual database connectivity.
 
 ## Validation
-- `npm test`: 82 HTTP checks against isolated PGlite PostgreSQL with actual schema, constraints and SQL. Includes duplicate booking, block conflicts, balances, idempotency, overpayment, checkout, rate snapshots, revoked staff, role restrictions and unconfirmed VAT. PGlite adapter serializes a single database; this is not a production connection-pool or concurrent transaction load test.
+- `npm test`: 159 HTTP checks against isolated PGlite PostgreSQL with actual schema, constraints and SQL. Includes duplicate booking, block conflicts, balances, idempotency, overpayment, checkout, rate snapshots, revoked staff, role restrictions and unconfirmed VAT. PGlite adapter serializes a single database; this is not a production connection-pool or concurrent transaction load test.
 - Production frontend and backend builds passed.
 - Live login screen rendered in the cloud browser; signed-in desktop/mobile visual QA remains open.
 
@@ -57,3 +57,16 @@ Confirm room capacities, backup/restore capability, staff roster and real hotel 
 - Admins cannot disable or demote their own account. Staff changes and password events are audited without plaintext passwords.
 - Additive migration: `supabase/migrations/20261018195112_staff_management.sql`. Production runtime gains only the staff INSERT/UPDATE columns needed; existing hotel RLS remains in force. No public Data API access is granted.
 - 82 isolated HTTP checks passed, including receptionist walk-in creation/check-in, forced password change, manager permissions, admin restrictions, cross-hotel isolation and password-reset session revocation. No production staff test accounts were created.
+
+## Guest booking requests and full advance
+- Customer portal: `/guest`. Separate registration/sign-in with Argon2 password hashing, 30-minute customer JWT audience, server-side ownership filters and no customer access to staff APIs. Sign-up/sign-in use the existing rate limiter; accounts are limited to five active unpaid requests.
+- Workflow: PENDING_REVIEW → AWAITING_PAYMENT → PAYMENT_REVIEW → CONFIRMED. Reception may verify a payment received directly at the desk from AWAITING_PAYMENT too. Approving a request does not hold inventory.
+- Customers request a category and dates, receive a saved room-rate quote, submit their payment/receipt reference after approval, and see reception decisions and the final room number.
+- Reception uses Booking requests to approve, decline with a customer-visible reason, acknowledge notifications, and verify actual full payment before assigning a ready room in the requested category.
+- Full quoted advance, staff verification, payment reference, room availability, maintenance conflicts and reservation overlaps are checked on the server. Allocation, guest/reservation creation, folio charges and the advance payment commit in one transaction. Failure rolls back all inserts. Replaying confirmation does not record a second payment, and the same payment reference cannot fund two request bookings.
+- Durable per-staff unread notifications appear in-app and poll every 15 seconds while signed in. Customer booking statuses poll at the same interval. These are not email/SMS or background push notifications.
+- The gateway is not configured: the portal does not collect card details or move money. Guests arrange payment through hotel reception, which verifies the bank/receipt records. No bank account details were invented.
+- VAT remains unconfirmed. Quotes and advance amounts are explicitly before tax; official tax invoice issuance remains blocked.
+- Additive migration: `supabase/migrations/20261018202417_guest_booking_requests.sql`; all new tables use hotel-scoped runtime RLS, with no anon/authenticated Data API grants.
+- 159 isolated HTTP checks cover customer/staff token separation, ownership, cross-hotel denial, approval without allocation, payment-reference notifications, partial/excess advance refusal, duplicate-reference rollback, maintenance and overlap conflicts, saved rates, paid allocation, cancellation/rejection and request limits. Frontend and API builds passed. These tests do not process actual payments.
+- Account email verification/recovery, payment gateway setup, and closed-browser push delivery are separate integrations and are not claimed as implemented.

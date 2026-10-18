@@ -16,8 +16,8 @@ async function bootstrap(){
  app.setGlobalPrefix('api/v1');
  app.useGlobalFilters(new SafeErrors());
  const attempts=new Map<string,{count:number;until:number}>();
- app.use((req:any,res:any,next:()=>void)=>{if(req.method==='POST'&&req.path==='/api/v1/auth/login'){
-  const now=Date.now(),key=req.ip||'unknown';for(const [ip,v] of attempts)if(v.until<now)attempts.delete(ip);
+ app.use((req:any,res:any,next:()=>void)=>{if(req.method==='POST'&&['/api/v1/auth/login','/api/v1/guest/login','/api/v1/guest/register'].includes(req.path)){
+  const now=Date.now(),key=(req.ip||'unknown')+':'+req.path;for(const [ip,v] of attempts)if(v.until<now)attempts.delete(ip);
   const value=attempts.get(key)||{count:0,until:now+60000};value.count++;attempts.set(key,value);
   if(value.count>10){res.status(429).json({message:'Too many sign-in attempts. Try again in one minute.'});return;}
  }res.setHeader('X-Content-Type-Options','nosniff');res.setHeader('Cache-Control','no-store');next();});

@@ -10,6 +10,7 @@ const argon2=require('argon2');
  await db.waitReady;
  for(const f of ['phase1.sql','phase2-billing.sql','phase2-tax-safety.sql','seed-pk-hotels-rooms.sql'])await db.exec(fs.readFileSync('apps/api/prisma/'+f,'utf8'));
  await db.exec(fs.readFileSync('supabase/migrations/20261018195112_staff_management.sql','utf8'));
+ await db.exec(fs.readFileSync('supabase/migrations/20261018202417_guest_booking_requests.sql','utf8'));
  const hotel=(await db.query('SELECT id FROM hotels')).rows[0].id;
  const hash=await argon2.hash('Test-Only-Password-123');
  await db.query("INSERT INTO staff(hotel_id,email,password_hash,role) VALUES($1,'test@example.com',$2,'ADMIN')",[hotel,hash]);
@@ -102,6 +103,106 @@ const argon2=require('argon2');
  await request('/staff/'+outsider+'/access',{fullName:'Denied',role:'RECEPTIONIST',active:false},400);
  await request('/staff/'+outsider+'/reset-password',{temporaryPassword:'Denied-Password-123'},400);
  assert(!(await request('/staff')).some(x=>x.id===outsider));
+
+ // Customer and staff tokens use separate audiences. Requests never hold inventory.
+ token='';await request('/guest/requests',undefined,401);
+ await request('/guest/register',{fullName:'Guest one',phone:'0500000001',email:'customer1@example.com',password:'short'},400);
+ const customer1={fullName:'Guest one',phone:'0500000001',email:'customer1@example.com',password:'Customer-Password-123'};
+ await request('/guest/register',customer1,201);await request('/guest/register',{...customer1,email:'CUSTOMER1@example.com'},409);
+ await request('/guest/login',{email:customer1.email,password:'wrong'},401);
+ token=(await request('/guest/login',{email:customer1.email,password:customer1.password},201)).accessToken;const customerToken=token;
+ const profile=await request('/guest/me');assert.equal(profile.password_hash,undefined);
+ const catalog=await request('/guest/catalog');assert.equal(catalog.advancePercent,100);assert.equal(catalog.onlinePaymentsEnabled,false);
+ await request('/operations/rooms',undefined,401);await request('/booking-requests',undefined,401);await request('/billing/folios/'+opened.folioId,undefined,401);await request('/staff',undefined,401);
+ const requestBody={roomTypeId:rooms[4].room_type_id,arrivalDate:day,departureDate:departure};
+ await request('/guest/requests',{...requestBody,arrivalDate:'2020-01-01'},400);
+ await request('/guest/requests',{...requestBody,departureDate:day},400);
+ await request('/guest/requests',{...requestBody,nightlyRate:'0.01'},400);
+ const bookingsBefore=(await db.query('SELECT count(*)::int AS n FROM reservations')).rows[0].n;
+ const online=await request('/guest/requests',requestBody,201);assert.equal(online.status,'PENDING_REVIEW');
+ const quote=online.advance_required_sar;assert.equal(Number(quote),Number(rooms[4].nightly_rate));
+ assert.equal((await db.query('SELECT count(*)::int AS n FROM reservations')).rows[0].n,bookingsBefore);
+ await request('/guest/requests/'+online.id+'/payment-reference',{reference:'not-approved'},409);
+ // A different customer cannot see, cancel, or submit a reference on this request.
+ token='';await request('/guest/register',{...customer1,email:'customer2@example.com'},201);
+ token=(await request('/guest/login',{email:'customer2@example.com',password:customer1.password},201)).accessToken;
+ assert.equal((await request('/guest/requests')).length,0);
+ await request('/guest/requests/'+online.id+'/cancel',{},409);
+ await request('/guest/requests/'+online.id+'/payment-reference',{reference:'other-user'},409);
+ token=adminToken;await request('/guest/requests',undefined,401);
+ let queue=await request('/booking-requests');assert(queue.find(q=>q.id===online.id).unread);
+ await request('/booking-requests/read',{requestId:online.id,version:1},201);
+ queue=await request('/booking-requests');assert.equal(queue.find(q=>q.id===online.id).unread,false);
+ const verify={roomId:rooms[4].id,amountSar:quote,method:'BANK_TRANSFER',reference:'TEST-ADVANCE-ONE',paymentReceived:true};
+ await request('/booking-requests/'+online.id+'/verify-and-allocate',verify,409);
+ await request('/booking-requests/'+online.id+'/approve',{},201);
+ assert.equal((await db.query('SELECT count(*)::int AS n FROM reservations')).rows[0].n,bookingsBefore);
+ token=customerToken;await request('/guest/requests/'+online.id+'/payment-reference',{reference:'TEST-ADVANCE-ONE'},201);
+ assert.equal((await request('/guest/requests'))[0].room_number,null);
+ await request('/guest/requests/'+online.id+'/cancel',{},409);
+ token=adminToken;queue=await request('/booking-requests');assert.equal(queue.find(q=>q.id===online.id).unread,true);
+ await request('/booking-requests/'+online.id+'/verify-and-allocate',{...verify,paymentReceived:false},400);
+ await request('/booking-requests/'+online.id+'/verify-and-allocate',{...verify,amountSar:String(Number(quote)-1)},409);
+ await request('/booking-requests/'+online.id+'/verify-and-allocate',{...verify,amountSar:String(Number(quote)+1)},409);
+ await request('/booking-requests/'+online.id+'/verify-and-allocate',{...verify,roomId:rooms.find(r=>r.room_type_id!==requestBody.roomTypeId).id},409);
+ // Locked room and maintenance checks fail without recording a payment or reservation.
+ await request('/operations/blocks',{roomId:rooms[4].id,startDate:day,endDate:departure,reason:'Online request allocation conflict'},201);
+ await request('/booking-requests/'+online.id+'/verify-and-allocate',verify,409);
+ assert.equal((await db.query('SELECT count(*)::int AS n FROM reservations')).rows[0].n,bookingsBefore);
+ assert.equal((await db.query('SELECT count(*)::int AS n FROM folio_payments WHERE idempotency_key=$1',[online.id])).rows[0].n,0);
+ // Existing overlapping booking is also rejected.
+ const conflict=await request('/operations/reservations',{guestId:guest.id,roomId:rooms[5].id,arrivalDate:day,departureDate:departure},201);
+ await request('/booking-requests/'+online.id+'/verify-and-allocate',{...verify,roomId:rooms[5].id},409);
+ // Receptionist can approve, verify actual advance and allocate, with saved quote rates.
+ await db.query("UPDATE staff SET active=true,role='RECEPTIONIST',must_change_password=false WHERE id=$1",[staff.id]);
+ token=(await request('/auth/login',{email:staff.email,password:'Reset-Password-123'},201)).accessToken;
+ await request('/booking-requests');
+ const allocated=await request('/booking-requests/'+online.id+'/verify-and-allocate',{...verify,roomId:rooms[6].id},201);
+ const replay=await request('/booking-requests/'+online.id+'/verify-and-allocate',{...verify,roomId:rooms[6].id},201);assert.equal(replay.reservationId,allocated.reservationId);
+ await request('/booking-requests/'+online.id+'/verify-and-allocate',{...verify,roomId:rooms[6].id,reference:'DIFFERENT'},409);
+ const paidFolio=await request('/billing/folios/'+allocated.folioId);assert.equal(paidFolio.balanceBeforeTaxSar,'0.00');assert.equal(paidFolio.payments.length,1);assert.equal(paidFolio.lines.length,1);
+ token=customerToken;const customerBookings=await request('/guest/requests');assert.equal(customerBookings.find(q=>q.id===online.id).room_number,rooms[6].number);assert.equal(customerBookings.find(q=>q.id===online.id).status,'CONFIRMED');
+ const secondOnline=await request('/guest/requests',requestBody,201);
+ token=adminToken;await request('/booking-requests/'+secondOnline.id+'/approve',{},201);
+ // Reuse of the same bank reference rolls back all inserts.
+ const countBeforeDuplicate=(await db.query('SELECT count(*)::int AS n FROM reservations')).rows[0].n;
+ await request('/booking-requests/'+secondOnline.id+'/verify-and-allocate',{...verify,roomId:rooms[7].id},409);
+ assert.equal((await db.query('SELECT count(*)::int AS n FROM reservations')).rows[0].n,countBeforeDuplicate);
+ assert.equal((await db.query('SELECT status FROM booking_requests WHERE id=$1',[secondOnline.id])).rows[0].status,'AWAITING_PAYMENT');
+ await request('/booking-requests/'+secondOnline.id+'/reject',{reason:'No suitable room available. Contact reception before sending payment.'},201);
+ token=customerToken;assert.equal((await request('/guest/requests')).find(q=>q.id===secondOnline.id).status,'REJECTED');
+ const cancelOnline=await request('/guest/requests',requestBody,201);await request('/guest/requests/'+cancelOnline.id+'/cancel',{},201);
+ token=adminToken;await request('/booking-requests/'+cancelOnline.id+'/approve',{},409);
+ await request('/booking-requests/'+online.id+'/reject',{reason:'Cannot reject a paid and confirmed reservation'},409);
+
+ // Payment verification keeps the original quote even if the live rate changes later.
+ token=customerToken;const rateSnapshotRequest=await request('/guest/requests',requestBody,201);
+ token=adminToken;await request('/booking-requests/'+rateSnapshotRequest.id+'/approve',{},201);
+ await db.query('UPDATE room_types SET nightly_rate=nightly_rate+20 WHERE id=$1',[requestBody.roomTypeId]);
+ const snapAllocation=await request('/booking-requests/'+rateSnapshotRequest.id+'/verify-and-allocate',{...verify,roomId:rooms[8].id,amountSar:rateSnapshotRequest.advance_required_sar,reference:'SNAPSHOT-ADVANCE'},201);
+ assert.equal((await request('/billing/folios/'+snapAllocation.folioId)).balanceBeforeTaxSar,'0.00');
+ assert.equal(Number((await db.query('SELECT nightly_rate FROM reservations WHERE id=$1',[snapAllocation.reservationId])).rows[0].nightly_rate),Number(rateSnapshotRequest.advance_required_sar));
+ // Acknowledging an older notification cannot hide a later payment-reference update.
+ await request('/booking-requests/read',{requestId:online.id,version:1},201);
+ assert.equal((await request('/booking-requests')).find(q=>q.id===online.id).unread,true);
+ await request('/booking-requests/read',{requestId:online.id,version:2},201);
+ assert.equal((await request('/booking-requests')).find(q=>q.id===online.id).unread,false);
+ // Verify no customer can obtain billing/staff data by changing JWT audience or using staff routes.
+ token=customerToken;await request('/booking-requests/'+online.id+'/approve',{},401);
+ token=adminToken;
+ const outsiderRequest=(await db.query("INSERT INTO customer_accounts(hotel_id,full_name,email,phone,password_hash) VALUES($1,'Other guest','other@example.com','0500000099',$2) RETURNING id",[otherHotel,hash])).rows[0];
+ assert(!(await request('/booking-requests')).some(q=>q.customer_id===outsiderRequest.id));
+ const outsideType=(await db.query("INSERT INTO room_types(hotel_id,name,nightly_rate,capacity) VALUES($1,'Other category',100,1) RETURNING id",[otherHotel])).rows[0];
+ const outsideBooking=(await db.query('INSERT INTO booking_requests(hotel_id,customer_id,room_type_id,arrival_date,departure_date,nightly_rate,advance_required_sar) VALUES($1,$2,$3,$4,$5,100,100) RETURNING id',[otherHotel,outsiderRequest.id,outsideType.id,day,departure])).rows[0];
+ await request('/booking-requests/'+outsideBooking.id+'/approve',{},409);
+ await request('/booking-requests/'+outsideBooking.id+'/reject',{reason:'Denied cross hotel'},409);
+ await request('/booking-requests/read',{requestId:outsideBooking.id,version:1},400);
+ await request('/booking-requests/'+outsideBooking.id+'/verify-and-allocate',verify,400);
+ token=customerToken;assert(!(await request('/guest/requests')).some(q=>q.id===outsideBooking.id));
+ // Bound the number of active unpaid requests for one customer.
+ for(let i=0;i<5;i++)await request('/guest/requests',requestBody,201);
+ await request('/guest/requests',requestBody,409);token=adminToken;
+
  const staffId=(await db.query("SELECT id FROM staff WHERE email='test@example.com'")).rows[0].id;
  await db.query("UPDATE staff SET role='RECEPTIONIST' WHERE id=$1",[staffId]);
  await request('/operations/rooms',undefined,401);
@@ -110,6 +211,6 @@ const argon2=require('argon2');
  await request('/operations/blocks',{roomId:rooms[2].id,startDate:day,endDate:departure,reason:'Denied'},403);
  await request('/operations/rooms');
  await db.query("UPDATE staff SET active=false WHERE email='test@example.com'");await request('/operations/rooms',undefined,401);
- console.log('PASS:',count,'HTTP checks, real PostgreSQL constraints, billing totals, payment idempotency, VAT-unconfirmed statement, checkout and staff revocation.');
+ console.log('PASS:',count,'HTTP checks: staff RBAC, customer isolation, booking requests, notifications, full-advance allocation, duplicate-payment rollback, billing, checkout and VAT safeguards.');
  }finally{await app.close();await db.close();}
 })().catch(e=>{console.error(e);process.exitCode=1});
